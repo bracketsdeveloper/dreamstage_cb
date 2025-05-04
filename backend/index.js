@@ -246,8 +246,8 @@ async function sendConfirmation(phoneId, to, resp) {
           body:   { text: `You selected: "${resp}"\nDo you want to change it?` },
           action: {
             buttons: [
-              { type: "reply", reply: { id: "confirm_yes", title: "No, change it" } },
-              { type: "reply", reply: { id: "confirm_no",  title: "Yes, continue" } }
+              { type: "reply", reply: { id: "confirm_yes", title: "Yes, continue" } },
+              { type: "reply", reply: { id: "confirm_no",  title: "No, change it" } }
             ]
           }
         }
