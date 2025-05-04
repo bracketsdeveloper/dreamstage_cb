@@ -26,16 +26,16 @@ const transporter = nodemailer.createTransport({
   }
 })
 
-// global error handlers
+// Global error handlers
 process.on('unhandledRejection', (reason, p) => console.error('Unhandled Rejection at:', p, 'reason:', reason))
 process.on('uncaughtException', err => { console.error('Uncaught Exception:', err); process.exit(1) })
 
-// connect to MongoDB
+// Connect to MongoDB
 mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log("MongoDB connected"))
   .catch(err => { console.error("MongoDB connection error:", err); process.exit(1) })
 
-// webhook verification
+// Verification endpoint
 app.get("/webhook", (req, res) => {
   try {
     const { "hub.mode": mode, "hub.challenge": challenge, "hub.verify_token": tokenReq } = req.query
@@ -49,15 +49,15 @@ app.get("/webhook", (req, res) => {
   }
 })
 
-// message handler
+// Message handler
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body
     if (!body.object) return res.sendStatus(200)
 
-    const entry  = body.entry?.[0]
-    const change = entry?.changes?.[0]?.value
-    const msgs   = change?.messages
+    const entry   = body.entry?.[0]
+    const change  = entry?.changes?.[0]?.value
+    const msgs    = change?.messages
     if (!Array.isArray(msgs) || !msgs.length) return res.sendStatus(200)
 
     const msg     = msgs[0]
@@ -82,14 +82,21 @@ app.post("/webhook", async (req, res) => {
     }
 
     const confirmedCount = userAns.responses.filter(r => r.confirmed).length
+
+    // If already complete, send thank you once
     if (confirmedCount >= allQs.length) {
       await sendText(phoneId, from, "You’ve completed all questions. Thank you!")
-      await sendCompletionEmail(userAns, allQs)
+      if (!userAns.mailStatus) {
+        await sendCompletionEmail(userAns, allQs)
+        userAns.mailStatus = true
+        await userAns.save()
+      }
       return res.sendStatus(200)
     }
+
     const currentQ = allQs[confirmedCount]
 
-    // initial list selection
+    // Initial list selection for "options"
     if (type === "interactive" && msg.interactive?.list_reply) {
       const sel = msg.interactive.list_reply.title
       userAns.responses.push({ question: currentQ._id, answer: sel, confirmed: false })
@@ -98,7 +105,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200)
     }
 
-    // initial boolean answer
+    // Initial boolean answer
     if (type === "interactive" && msg.interactive?.button_reply?.id?.startsWith("ans_")) {
       const ansId = msg.interactive.button_reply.id
       const ans   = ansId === "ans_yes" ? "Yes" : "No"
@@ -108,14 +115,14 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200)
     }
 
-    // confirmation buttons
+    // Confirmation buttons
     if (type === "interactive" && msg.interactive?.button_reply?.id?.startsWith("confirm_")) {
       const btnId = msg.interactive.button_reply.id
       const idx   = userAns.responses.findIndex(r => !r.confirmed)
       if (idx < 0) return res.sendStatus(200)
 
       if (btnId === "confirm_yes") {
-        // if first question, store userName
+        // store userName if first question
         if (idx === 0) {
           userAns.userName = userAns.responses[idx].answer
         }
@@ -127,9 +134,13 @@ app.post("/webhook", async (req, res) => {
           await askQuestion(phoneId, from, allQs[nextIdx])
         } else {
           await sendText(phoneId, from, "✅ All done!")
-          await sendCompletionEmail(userAns, allQs)
+          if (!userAns.mailStatus) {
+            await sendCompletionEmail(userAns, allQs)
+            userAns.mailStatus = true
+            await userAns.save()
+          }
         }
-      } else if (btnId === "confirm_no") {
+      } else {
         userAns.responses.splice(idx, 1)
         await userAns.save()
         await askQuestion(phoneId, from, currentQ)
@@ -137,7 +148,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200)
     }
 
-    // free-text replies
+    // Free-text replies
     if (type === "text") {
       const textBody = msg.text.body.trim()
       switch (currentQ.answerType) {
@@ -171,6 +182,8 @@ app.post("/webhook", async (req, res) => {
   }
 })
 
+// ─── HELPERS ────────────────────────────────────────────────────────────────────
+
 async function askQuestion(phoneId, to, q) {
   if (q.answerType === "options" && q.options.length) {
     for (let i = 0; i < q.options.length; i += 10) {
@@ -196,8 +209,7 @@ async function askQuestion(phoneId, to, q) {
         console.error("askQuestion(list) error:", e.response?.data || e.message)
       }
     }
-  }
-  else if (q.answerType === "boolean") {
+  } else if (q.answerType === "boolean") {
     await axios.post(
       `${METAURL}${phoneId}/messages?access_token=${token}`,
       {
@@ -217,8 +229,7 @@ async function askQuestion(phoneId, to, q) {
       },
       { headers: { "Content-Type": "application/json" } }
     )
-  }
-  else {
+  } else {
     await sendText(phoneId, to, q.question)
   }
 }

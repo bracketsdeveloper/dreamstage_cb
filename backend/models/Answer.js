@@ -12,6 +12,7 @@ const responseSchema = new Schema({
 const answerSchema = new Schema({
   phoneNumber: { type: String, required: true, unique: true },
   userName:    { type: String, default: "" },
+  mailStatus:  { type: Boolean, default: false },
   responses:   { type: [responseSchema],     default: [] }
 }, { timestamps: true })
 
