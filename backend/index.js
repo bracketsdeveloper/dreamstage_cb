@@ -1,56 +1,44 @@
 'use strict'
 
-const express      = require("express")
-const bodyParser   = require("body-parser")
-const axios        = require("axios")
-const mongoose     = require("mongoose")
-const nodemailer   = require("nodemailer")
+const express    = require("express")
+const bodyParser = require("body-parser")
+const axios      = require("axios")
+const mongoose   = require("mongoose")
+const nodemailer = require("nodemailer")
 require("dotenv").config()
 
 const Question = require("./models/Question.js")
 const Answer   = require("./models/Answer.js")
 
-const app    = express().use(bodyParser.json())
-const PORT   = process.env.PORT       || 3000
-const METAURL= "https://graph.facebook.com/v22.0/"
-const token  = process.env.TOKEN
-const mytoken= process.env.MYTOKEN
+const app     = express().use(bodyParser.json())
+const PORT    = process.env.PORT       || 3000
+const METAURL = "https://graph.facebook.com/v22.0/"
+const token   = process.env.TOKEN
+const mytoken = process.env.MYTOKEN
 const MONGO_URI = process.env.MONGODB_URI
 
-// Email config using Gmail + app password
+// Gmail transporter with app password
 const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: process.env.EMAIL_USER, // your@gmail.com
-      pass: process.env.EMAIL_PASS  // your 16-char app password
-    }
-  });
-  
-
-// ─── Global error handlers ─────────────────────────────────────────────────────
-process.on('unhandledRejection', (reason, p) => {
-  console.error('Unhandled Rejection at:', p, 'reason:', reason)
-})
-process.on('uncaughtException', err => {
-  console.error('Uncaught Exception:', err)
-  process.exit(1)
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
 })
 
-// ─── Connect to MongoDB ─────────────────────────────────────────────────────────
-mongoose
-  .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+// global error handlers
+process.on('unhandledRejection', (reason, p) => console.error('Unhandled Rejection at:', p, 'reason:', reason))
+process.on('uncaughtException', err => { console.error('Uncaught Exception:', err); process.exit(1) })
+
+// connect to MongoDB
+mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log("MongoDB connected"))
-  .catch(err => {
-    console.error("MongoDB connection error:", err)
-    process.exit(1)
-  })
+  .catch(err => { console.error("MongoDB connection error:", err); process.exit(1) })
 
-// ─── Verification Endpoint ─────────────────────────────────────────────────────
+// webhook verification
 app.get("/webhook", (req, res) => {
   try {
-    const mode      = req.query["hub.mode"]
-    const challenge = req.query["hub.challenge"]
-    const tokenReq  = req.query["hub.verify_token"]
+    const { "hub.mode": mode, "hub.challenge": challenge, "hub.verify_token": tokenReq } = req.query
     if (mode === "subscribe" && tokenReq === mytoken) {
       return res.status(200).send(challenge)
     }
@@ -61,17 +49,16 @@ app.get("/webhook", (req, res) => {
   }
 })
 
-// ─── Message Handler ─────────────────────────────────────────────────────────────
+// message handler
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body
-    // ignore non-WhatsApp callbacks
     if (!body.object) return res.sendStatus(200)
 
-    const entry   = body.entry?.[0]
-    const change  = entry?.changes?.[0]?.value
-    const msgs    = change?.messages
-    if (!Array.isArray(msgs) || msgs.length === 0) return res.sendStatus(200)
+    const entry  = body.entry?.[0]
+    const change = entry?.changes?.[0]?.value
+    const msgs   = change?.messages
+    if (!Array.isArray(msgs) || !msgs.length) return res.sendStatus(200)
 
     const msg     = msgs[0]
     const type    = msg.type
@@ -81,14 +68,12 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200)
     }
 
-    // load all questions once
     const allQs = await Question.find().sort({ order: 1 }).exec()
-    if (allQs.length === 0) {
-      console.error("No questions in database")
+    if (!allQs.length) {
+      console.error("No questions in DB")
       return res.sendStatus(500)
     }
 
-    // fetch or create this user's answer doc
     let userAns = await Answer.findOne({ phoneNumber: from }).exec()
     if (!userAns) {
       userAns = await Answer.create({ phoneNumber: from })
@@ -96,81 +81,80 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200)
     }
 
-    // check if already complete
     const confirmedCount = userAns.responses.filter(r => r.confirmed).length
     if (confirmedCount >= allQs.length) {
-      // send final thank you & email one more time
       await sendText(phoneId, from, "You’ve completed all questions. Thank you!")
       await sendCompletionEmail(userAns, allQs)
       return res.sendStatus(200)
     }
-
     const currentQ = allQs[confirmedCount]
 
-    // ─── Handle options list selection ──────────────────────────────────────────
+    // initial list selection
     if (type === "interactive" && msg.interactive?.list_reply) {
-      const selection = msg.interactive.list_reply.title
-      userAns.responses.push({ question: currentQ._id, answer: selection, confirmed: false })
+      const sel = msg.interactive.list_reply.title
+      userAns.responses.push({ question: currentQ._id, answer: sel, confirmed: false })
       await userAns.save()
-      await sendConfirmation(phoneId, from, selection)
+      await sendConfirmation(phoneId, from, sel)
       return res.sendStatus(200)
     }
 
-    // ─── Handle Yes/No confirmation buttons ────────────────────────────────────
-    if (type === "interactive" && msg.interactive?.button_reply) {
-      const replyId   = msg.interactive.button_reply.id
-      const pendingIdx = userAns.responses.findIndex(r => !r.confirmed)
-      if (pendingIdx < 0) return res.sendStatus(200)
+    // initial boolean answer
+    if (type === "interactive" && msg.interactive?.button_reply?.id?.startsWith("ans_")) {
+      const ansId = msg.interactive.button_reply.id
+      const ans   = ansId === "ans_yes" ? "Yes" : "No"
+      userAns.responses.push({ question: currentQ._id, answer: ans, confirmed: false })
+      await userAns.save()
+      await sendConfirmation(phoneId, from, ans)
+      return res.sendStatus(200)
+    }
 
-      if (replyId === "yes_response") {
-        userAns.responses[pendingIdx].confirmed = true
+    // confirmation buttons
+    if (type === "interactive" && msg.interactive?.button_reply?.id?.startsWith("confirm_")) {
+      const btnId = msg.interactive.button_reply.id
+      const idx   = userAns.responses.findIndex(r => !r.confirmed)
+      if (idx < 0) return res.sendStatus(200)
+
+      if (btnId === "confirm_yes") {
+        userAns.responses[idx].confirmed = true
         await userAns.save()
-
         const nextIdx = confirmedCount + 1
         if (nextIdx < allQs.length) {
           await askQuestion(phoneId, from, allQs[nextIdx])
         } else {
-          // completed!
-          await sendText(phoneId, from, "✅ Thank you! You’ve completed all questions.")
+          await sendText(phoneId, from, "✅ All done!")
           await sendCompletionEmail(userAns, allQs)
         }
-      } else if (replyId === "no_response") {
-        userAns.responses.splice(pendingIdx, 1)
+      } else if (btnId === "confirm_no") {
+        userAns.responses.splice(idx, 1)
         await userAns.save()
         await askQuestion(phoneId, from, currentQ)
       }
-
       return res.sendStatus(200)
     }
 
-    // ─── Handle free-text replies ────────────────────────────────────────────────
+    // free-text replies
     if (type === "text") {
       const textBody = msg.text.body.trim()
-
-      // validate based on answerType
       switch (currentQ.answerType) {
         case "number":
           if (!/^\d+$/.test(textBody)) {
             await sendText(phoneId, from, "⚠️ Please enter a valid number.")
-            return askQuestion(phoneId, from, currentQ).then(() => res.sendStatus(200))
+            await askQuestion(phoneId, from, currentQ)
+            return res.sendStatus(200)
           }
           break
         case "boolean":
-          if (!/^(yes|no)$/i.test(textBody)) {
-            await sendText(phoneId, from, "⚠️ Please reply with Yes or No.")
-            return askQuestion(phoneId, from, currentQ).then(() => res.sendStatus(200))
-          }
-          break
+          await sendText(phoneId, from, "⚠️ Please use the Yes/No buttons.")
+          await askQuestion(phoneId, from, currentQ)
+          return res.sendStatus(200)
         case "options":
-          await sendText(phoneId, from, "⚠️ Please select from the provided list.")
-          return askQuestion(phoneId, from, currentQ).then(() => res.sendStatus(200))
+          await sendText(phoneId, from, "⚠️ Please select from the list.")
+          await askQuestion(phoneId, from, currentQ)
+          return res.sendStatus(200)
       }
-
-      // record response (unconfirmed)
       userAns.responses = userAns.responses.filter(r => r.confirmed)
       userAns.responses.push({ question: currentQ._id, answer: textBody, confirmed: false })
       await userAns.save()
-
       await sendConfirmation(phoneId, from, textBody)
       return res.sendStatus(200)
     }
@@ -182,13 +166,14 @@ app.post("/webhook", async (req, res) => {
   }
 })
 
-// ─── Helpers ────────────────────────────────────────────────────────────────────
-
-async function askQuestion(phoneId, to, questionDoc) {
-  if (questionDoc.answerType === "options" && questionDoc.options.length) {
-    for (let i = 0; i < questionDoc.options.length; i += 10) {
-      const chunk = questionDoc.options.slice(i, i + 10)
-      const sections = [{ title: questionDoc.question, rows: chunk.map(opt => ({ id: opt, title: opt })) }]
+async function askQuestion(phoneId, to, q) {
+  if (q.answerType === "options" && q.options.length) {
+    for (let i = 0; i < q.options.length; i += 10) {
+      const chunk = q.options.slice(i, i + 10)
+      const sections = [{
+        title: q.question,
+        rows: chunk.map(o => ({ id: o, title: o }))
+      }]
       try {
         await axios.post(
           `${METAURL}${phoneId}/messages?access_token=${token}`,
@@ -198,7 +183,7 @@ async function askQuestion(phoneId, to, questionDoc) {
             type: "interactive",
             interactive: {
               type: "list",
-              header: { type: "text", text: questionDoc.question },
+              header: { type: "text", text: q.question },
               body:   { text: "Please choose an option." },
               action: { button: "View options", sections }
             }
@@ -210,11 +195,29 @@ async function askQuestion(phoneId, to, questionDoc) {
       }
     }
   }
-  else if (questionDoc.answerType === "boolean") {
-    await sendBooleanButtons(phoneId, to, questionDoc.question)
+  else if (q.answerType === "boolean") {
+    await axios.post(
+      `${METAURL}${phoneId}/messages?access_token=${token}`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body:   { text: q.question },
+          action: {
+            buttons: [
+              { type: "reply", reply: { id: "ans_yes", title: "Yes" }},
+              { type: "reply", reply: { id: "ans_no",  title: "No"  }}
+            ]
+          }
+        }
+      },
+      { headers: { "Content-Type": "application/json" } }
+    )
   }
   else {
-    await sendText(phoneId, to, questionDoc.question)
+    await sendText(phoneId, to, q.question)
   }
 }
 
@@ -230,7 +233,7 @@ async function sendText(phoneId, to, body) {
   }
 }
 
-async function sendBooleanButtons(phoneId, to, questionText) {
+async function sendConfirmation(phoneId, to, resp) {
   try {
     await axios.post(
       `${METAURL}${phoneId}/messages?access_token=${token}`,
@@ -240,37 +243,11 @@ async function sendBooleanButtons(phoneId, to, questionText) {
         type: "interactive",
         interactive: {
           type: "button",
-          body:    { text: questionText },
-          action:  {
-            buttons: [
-              { type: "reply", reply: { id: "yes_response", title: "Yes" } },
-              { type: "reply", reply: { id: "no_response",  title: "No"  } }
-            ]
-          }
-        }
-      },
-      { headers: { "Content-Type": "application/json" } }
-    )
-  } catch (e) {
-    console.error("sendBooleanButtons error:", e.response?.data || e.message)
-  }
-}
-
-async function sendConfirmation(phoneId, to, responseText) {
-  try {
-    await axios.post(
-      `${METAURL}${phoneId}/messages?access_token=${token}`,
-      {
-        messaging_product: "whatsapp",
-        to,
-        type: "interactive",
-        interactive: {
-          type: "button",
-          body: { text: `You entered: "${responseText}"\nIs this correct?` },
+          body:   { text: `You selected: "${resp}"\nDo you want to change it?` },
           action: {
             buttons: [
-              { type: "reply", reply: { id: "yes_response", title: "Yes" } },
-              { type: "reply", reply: { id: "no_response",  title: "No, enter again" } }
+              { type: "reply", reply: { id: "confirm_yes", title: "No, change it" } },
+              { type: "reply", reply: { id: "confirm_no",  title: "Yes, continue" } }
             ]
           }
         }
@@ -282,29 +259,15 @@ async function sendConfirmation(phoneId, to, responseText) {
   }
 }
 
-// ─── Send summary email on completion ───────────────────────────────────────────
 async function sendCompletionEmail(userAns, allQs) {
   try {
-    const recipients = (process.env.NOTIFY_EMAILS || "")
-      .split(",")
-      .map(e => e.trim())
-      .filter(e => e)
+    const recipients = (process.env.NOTIFY_EMAILS || "").split(",").map(e => e.trim()).filter(Boolean)
+    if (!recipients.length) return
 
-    if (recipients.length === 0) {
-      console.warn("No notification emails configured")
-      return
-    }
-
-    // build email body
-    let html = `<h3>New responses from ${userAns.phoneNumber}</h3>`
-    if (userAns.userName) {
-      html += `<p><strong>Name:</strong> ${userAns.userName}</p>`
-    }
-    html += `<ul>`
-    userAns.responses.forEach(resp => {
-      const qObj = allQs.find(q => q._id.equals(resp.question))
-      const qText = qObj ? qObj.question : "Unknown question"
-      html += `<li><strong>${qText}</strong>: ${resp.answer}</li>`
+    let html = `<h3>Responses from ${userAns.phoneNumber}</h3><ul>`
+    userAns.responses.forEach(r => {
+      const q = allQs.find(q => q._id.equals(r.question))
+      html += `<li><strong>${q?.question||"?"}</strong>: ${r.answer}</li>`
     })
     html += `</ul>`
 
@@ -314,8 +277,7 @@ async function sendCompletionEmail(userAns, allQs) {
       subject: `Questionnaire completed by ${userAns.phoneNumber}`,
       html
     })
-
-    console.log("Completion email sent to:", recipients.join(", "))
+    console.log("Email sent to:", recipients.join(", "))
   } catch (err) {
     console.error("sendCompletionEmail error:", err)
   }
