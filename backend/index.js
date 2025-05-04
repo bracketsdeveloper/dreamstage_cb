@@ -115,8 +115,13 @@ app.post("/webhook", async (req, res) => {
       if (idx < 0) return res.sendStatus(200)
 
       if (btnId === "confirm_yes") {
+        // if first question, store userName
+        if (idx === 0) {
+          userAns.userName = userAns.responses[idx].answer
+        }
         userAns.responses[idx].confirmed = true
         await userAns.save()
+
         const nextIdx = confirmedCount + 1
         if (nextIdx < allQs.length) {
           await askQuestion(phoneId, from, allQs[nextIdx])
@@ -170,10 +175,7 @@ async function askQuestion(phoneId, to, q) {
   if (q.answerType === "options" && q.options.length) {
     for (let i = 0; i < q.options.length; i += 10) {
       const chunk = q.options.slice(i, i + 10)
-      const sections = [{
-        title: q.question,
-        rows: chunk.map(o => ({ id: o, title: o }))
-      }]
+      const sections = [{ title: q.question, rows: chunk.map(o => ({ id: o, title: o })) }]
       try {
         await axios.post(
           `${METAURL}${phoneId}/messages?access_token=${token}`,
@@ -243,12 +245,11 @@ async function sendConfirmation(phoneId, to, resp) {
         type: "interactive",
         interactive: {
           type: "button",
-          body:   { text: `You selected: "${resp}"\nDo you want to change it?` },
+          body:   { text: `You entered: "${resp}"\nDo you want to change it?` },
           action: {
             buttons: [
-              { type: "reply", reply: { id: "confirm_no",  title: "No, change it" } },
-              { type: "reply", reply: { id: "confirm_yes", title: "Yes, continue" } }
-              
+              { type: "reply", reply: { id: "confirm_yes", title: "No, change it" } },
+              { type: "reply", reply: { id: "confirm_no",  title: "Yes, continue" } }
             ]
           }
         }
@@ -265,7 +266,9 @@ async function sendCompletionEmail(userAns, allQs) {
     const recipients = (process.env.NOTIFY_EMAILS || "").split(",").map(e => e.trim()).filter(Boolean)
     if (!recipients.length) return
 
-    let html = `<h3>Responses from ${userAns.phoneNumber}</h3><ul>`
+    let html = `<h3>Responses from ${userAns.phoneNumber}</h3>`
+    if (userAns.userName) html += `<p><strong>Name:</strong> ${userAns.userName}</p>`
+    html += `<ul>`
     userAns.responses.forEach(r => {
       const q = allQs.find(q => q._id.equals(r.question))
       html += `<li><strong>${q?.question||"?"}</strong>: ${r.answer}</li>`
